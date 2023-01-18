@@ -9,7 +9,7 @@ use pyo3::{
     },
 };
 
-use chrono::{offset::TimeZone, Datelike, Timelike, Utc};
+use chrono::{offset::TimeZone, Utc};
 
 use tantivy as tv;
 
@@ -52,22 +52,27 @@ fn value_to_py(py: Python, value: &Value) -> PyResult<PyObject> {
         Value::I64(num) => (*num).into_py(py),
         Value::F64(num) => (*num).into_py(py),
         Value::Bytes(b) => b.to_object(py),
+        Value::Bool(v) => v.into_py(py),
+        Value::IpAddr(ip) => ip.to_string().into_py(py),
         Value::PreTokStr(_pretoken) => {
             // TODO implement me
             unimplemented!();
         }
-        Value::Date(d) => PyDateTime::new(
-            py,
-            d.year(),
-            d.month() as u8,
-            d.day() as u8,
-            d.hour() as u8,
-            d.minute() as u8,
-            d.second() as u8,
-            d.timestamp_subsec_micros(),
-            None,
-        )?
-        .into_py(py),
+        Value::Date(d) => {
+            let dt = d.into_utc();
+            PyDateTime::new(
+                py,
+                dt.year(),
+                dt.month() as u8,
+                dt.day() as u8,
+                dt.hour() as u8,
+                dt.minute() as u8,
+                dt.second() as u8,
+                dt.microsecond(),
+                None
+            )?
+            .into_py(py)
+        },
         Value::Facet(f) => Facet { inner: f.clone() }.into_py(py),
         Value::JsonObject(json_object) => {
             let inner: HashMap<_, _> = json_object
@@ -88,6 +93,8 @@ fn value_to_string(value: &Value) -> String {
         Value::Bytes(bytes) => format!("{:?}", bytes),
         Value::Date(d) => format!("{:?}", d),
         Value::Facet(facet) => facet.to_string(),
+        Value::Bool(v) => v.to_string(),
+        Value::IpAddr(ip) => ip.to_string(),
         Value::PreTokStr(_pretok) => {
             // TODO implement me
             unimplemented!();
