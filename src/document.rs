@@ -194,6 +194,9 @@ pub(crate) fn extract_value(any: &PyAny) -> PyResult<Value> {
     if let Ok(facet) = any.extract::<Facet>() {
         return Ok(Value::Facet(facet.inner));
     }
+    if let Ok(b) = any.extract::<Vec<u8>>() {
+        return Ok(Value::Bytes(b));
+    }
     Err(to_pyerr(format!("Value unsupported {any:?}")))
 }
 
@@ -297,6 +300,15 @@ impl Document {
     ///     field_name (str): The field name for which we are adding the integer.
     ///     value (int): The integer that will be added to the document.
     fn add_integer(&mut self, field_name: String, value: i64) {
+        add_value(self, field_name, value);
+    }
+
+    /// Add a float value to the document.
+    ///
+    /// Args:
+    ///     field_name (str): The field name for which we are adding the value.
+    ///     value (f64): The float that will be added to the document.
+    fn add_float(&mut self, field_name: String, value: f64) {
         add_value(self, field_name, value);
     }
 
