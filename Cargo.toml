@@ -16,7 +16,7 @@ pyo3-build-config = "0.20.0"
 [dependencies]
 base64 = "0.21"
 chrono = "0.4.23"
-tantivy = "0.21.0"
+tantivy = { git = "https://github.com/Mittal-Analytics/tantivy", branch = "patch/public-order-by-u64-field" }
 itertools = "0.10.5"
 futures = "0.3.26"
 pythonize = "0.20.0"
