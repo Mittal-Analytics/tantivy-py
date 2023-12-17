@@ -1,7 +1,8 @@
 #![allow(clippy::new_ret_no_self)]
 
-use crate::{document::Document, get_field, query::Query, to_pyerr};
-use pyo3::{exceptions::PyValueError, prelude::*};
+use crate::{document::Document, query::Query, to_pyerr};
+use pyo3::{basic::CompareOp, exceptions::PyValueError, prelude::*};
+use serde::{Deserialize, Serialize};
 use tantivy as tv;
 use tantivy::collector::{Count, MultiCollector, TopDocs};
 
@@ -13,9 +14,11 @@ pub(crate) struct Searcher {
     pub(crate) inner: tv::Searcher,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize, FromPyObject, PartialEq, Serialize)]
 enum Fruit {
+    #[pyo3(transparent)]
     Score(f32),
+    #[pyo3(transparent)]
     Order(u64),
 }
 
@@ -37,7 +40,28 @@ impl ToPyObject for Fruit {
     }
 }
 
-#[pyclass]
+#[pyclass(frozen, module = "tantivy")]
+#[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
+/// Enum representing the direction in which something should be sorted.
+pub(crate) enum Order {
+    /// Ascending. Smaller values appear first.
+    Asc,
+
+    /// Descending. Larger values appear first.
+    Desc,
+}
+
+impl From<Order> for tv::Order {
+    fn from(order: Order) -> Self {
+        match order {
+            Order::Asc => tv::Order::Asc,
+            Order::Desc => tv::Order::Desc,
+        }
+    }
+}
+
+#[pyclass(frozen, module = "tantivy")]
+#[derive(Clone, Default, Deserialize, PartialEq, Serialize)]
 /// Object holding a results successful search.
 pub(crate) struct SearchResult {
     hits: Vec<(Fruit, DocAddress)>,
@@ -49,6 +73,19 @@ pub(crate) struct SearchResult {
 
 #[pymethods]
 impl SearchResult {
+    #[new]
+    fn new(
+        py: Python,
+        hits: Vec<(PyObject, DocAddress)>,
+        count: Option<usize>,
+    ) -> PyResult<Self> {
+        let hits = hits
+            .iter()
+            .map(|(f, d)| Ok((f.extract(py)?, d.clone())))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(Self { hits, count })
+    }
+
     fn __repr__(&self) -> PyResult<String> {
         if let Some(count) = self.count {
             Ok(format!(
@@ -58,6 +95,26 @@ impl SearchResult {
         } else {
             Ok(format!("SearchResult(hits: {:?})", self.hits))
         }
+    }
+
+    fn __richcmp__(
+        &self,
+        other: &Self,
+        op: CompareOp,
+        py: Python<'_>,
+    ) -> PyObject {
+        match op {
+            CompareOp::Eq => (self == other).into_py(py),
+            CompareOp::Ne => (self != other).into_py(py),
+            _ => py.NotImplemented(),
+        }
+    }
+
+    fn __getnewargs__(
+        &self,
+        py: Python,
+    ) -> PyResult<(Vec<(PyObject, DocAddress)>, Option<usize>)> {
+        Ok((self.hits(py)?, self.count))
     }
 
     #[getter]
@@ -89,80 +146,97 @@ impl Searcher {
     ///         fields.
     ///     offset (Field, optional): The offset from which the results have
     ///         to be returned.
+    ///     order (Order, optional): The order in which the results
+    ///         should be sorted. If not specified, defaults to descending.
     ///
     /// Returns `SearchResult` object.
     ///
     /// Raises a ValueError if there was an error with the search.
-    #[pyo3(signature = (query, limit = 10, count = true, order_by_field = None, offset = 0))]
+    #[pyo3(signature = (query, limit = 10, count = true, order_by_field = None, offset = 0, order = Order::Desc))]
     fn search(
         &self,
-        _py: Python,
+        py: Python,
         query: &Query,
         limit: usize,
         count: bool,
         order_by_field: Option<&str>,
         offset: usize,
+        order: Order,
     ) -> PyResult<SearchResult> {
-        let mut multicollector = MultiCollector::new();
+        py.allow_threads(move || {
+            let mut multicollector = MultiCollector::new();
 
-        let count_handle = if count {
-            Some(multicollector.add_collector(Count))
-        } else {
-            None
-        };
-
-        let (mut multifruit, hits) = {
-            if let Some(order_by) = order_by_field {
-                let field = get_field(&self.inner.index().schema(), order_by)?;
-                let collector = TopDocs::with_limit(limit)
-                    .and_offset(offset)
-                    .order_by_u64_field(field);
-                let top_docs_handle = multicollector.add_collector(collector);
-                let ret = self.inner.search(query.get(), &multicollector);
-
-                match ret {
-                    Ok(mut r) => {
-                        let top_docs = top_docs_handle.extract(&mut r);
-                        let result: Vec<(Fruit, DocAddress)> = top_docs
-                            .iter()
-                            .map(|(f, d)| {
-                                (Fruit::Order(*f), DocAddress::from(d))
-                            })
-                            .collect();
-                        (r, result)
-                    }
-                    Err(e) => return Err(PyValueError::new_err(e.to_string())),
-                }
+            let count_handle = if count {
+                Some(multicollector.add_collector(Count))
             } else {
-                let collector = TopDocs::with_limit(limit).and_offset(offset);
-                let top_docs_handle = multicollector.add_collector(collector);
-                let ret = self.inner.search(query.get(), &multicollector);
+                None
+            };
 
-                match ret {
-                    Ok(mut r) => {
-                        let top_docs = top_docs_handle.extract(&mut r);
-                        let result: Vec<(Fruit, DocAddress)> = top_docs
-                            .iter()
-                            .map(|(f, d)| {
-                                (Fruit::Score(*f), DocAddress::from(d))
-                            })
-                            .collect();
-                        (r, result)
+            let (mut multifruit, hits) = {
+                if let Some(order_by) = order_by_field {
+                    let collector = TopDocs::with_limit(limit)
+                        .and_offset(offset)
+                        .order_by_fast_field(order_by, order.into());
+                    let top_docs_handle =
+                        multicollector.add_collector(collector);
+                    let ret = self.inner.search(query.get(), &multicollector);
+
+                    match ret {
+                        Ok(mut r) => {
+                            let top_docs = top_docs_handle.extract(&mut r);
+                            let result: Vec<(Fruit, DocAddress)> = top_docs
+                                .iter()
+                                .map(|(f, d)| {
+                                    (Fruit::Order(*f), DocAddress::from(d))
+                                })
+                                .collect();
+                            (r, result)
+                        }
+                        Err(e) => {
+                            return Err(PyValueError::new_err(e.to_string()))
+                        }
                     }
-                    Err(e) => return Err(PyValueError::new_err(e.to_string())),
+                } else {
+                    let collector =
+                        TopDocs::with_limit(limit).and_offset(offset);
+                    let top_docs_handle =
+                        multicollector.add_collector(collector);
+                    let ret = self.inner.search(query.get(), &multicollector);
+
+                    match ret {
+                        Ok(mut r) => {
+                            let top_docs = top_docs_handle.extract(&mut r);
+                            let result: Vec<(Fruit, DocAddress)> = top_docs
+                                .iter()
+                                .map(|(f, d)| {
+                                    (Fruit::Score(*f), DocAddress::from(d))
+                                })
+                                .collect();
+                            (r, result)
+                        }
+                        Err(e) => {
+                            return Err(PyValueError::new_err(e.to_string()))
+                        }
+                    }
                 }
-            }
-        };
+            };
 
-        let count = count_handle.map(|h| h.extract(&mut multifruit));
+            let count = count_handle.map(|h| h.extract(&mut multifruit));
 
-        Ok(SearchResult { hits, count })
+            Ok(SearchResult { hits, count })
+        })
     }
 
     /// Returns the overall number of documents in the index.
     #[getter]
     fn num_docs(&self) -> u64 {
         self.inner.num_docs()
+    }
+
+    /// Returns the number of segments in the index.
+    #[getter]
+    fn num_segments(&self) -> usize {
+        self.inner.segment_readers().len()
     }
 
     /// Fetches a document from Tantivy's store given a DocAddress.
@@ -195,8 +269,8 @@ impl Searcher {
 /// It consists in an id identifying its segment, and its segment-local DocId.
 /// The id used for the segment is actually an ordinal in the list of segment
 /// hold by a Searcher.
-#[pyclass]
-#[derive(Clone, Debug)]
+#[pyclass(frozen, module = "tantivy")]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct DocAddress {
     pub(crate) segment_ord: tv::SegmentOrdinal,
     pub(crate) doc: tv::DocId,
@@ -204,6 +278,11 @@ pub(crate) struct DocAddress {
 
 #[pymethods]
 impl DocAddress {
+    #[new]
+    fn new(segment_ord: tv::SegmentOrdinal, doc: tv::DocId) -> Self {
+        DocAddress { segment_ord, doc }
+    }
+
     /// The segment ordinal is an id identifying the segment hosting the
     /// document. It is only meaningful, in the context of a searcher.
     #[getter]
@@ -215,6 +294,23 @@ impl DocAddress {
     #[getter]
     fn doc(&self) -> u32 {
         self.doc
+    }
+
+    fn __richcmp__(
+        &self,
+        other: &Self,
+        op: CompareOp,
+        py: Python<'_>,
+    ) -> PyObject {
+        match op {
+            CompareOp::Eq => (self == other).into_py(py),
+            CompareOp::Ne => (self != other).into_py(py),
+            _ => py.NotImplemented(),
+        }
+    }
+
+    fn __getnewargs__(&self) -> PyResult<(tv::SegmentOrdinal, tv::DocId)> {
+        Ok((self.segment_ord, self.doc))
     }
 }
 

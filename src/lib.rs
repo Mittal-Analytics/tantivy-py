@@ -1,9 +1,10 @@
 use ::tantivy as tv;
-use pyo3::{exceptions, prelude::*};
+use pyo3::{exceptions, prelude::*, wrap_pymodule};
 
 mod document;
 mod facet;
 mod index;
+mod parser_error;
 mod query;
 mod schema;
 mod schemabuilder;
@@ -16,7 +17,7 @@ use index::Index;
 use query::Query;
 use schema::Schema;
 use schemabuilder::SchemaBuilder;
-use searcher::{DocAddress, Searcher};
+use searcher::{DocAddress, Order, SearchResult, Searcher};
 use snippet::{Snippet, SnippetGenerator};
 
 /// Python bindings for the search engine library Tantivy.
@@ -71,9 +72,11 @@ use snippet::{Snippet, SnippetGenerator};
 ///
 #[pymodule]
 fn tantivy(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_class::<Order>()?;
     m.add_class::<Schema>()?;
     m.add_class::<SchemaBuilder>()?;
     m.add_class::<Searcher>()?;
+    m.add_class::<SearchResult>()?;
     m.add_class::<Document>()?;
     m.add_class::<Index>()?;
     m.add_class::<DocAddress>()?;
@@ -81,6 +84,56 @@ fn tantivy(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Query>()?;
     m.add_class::<Snippet>()?;
     m.add_class::<SnippetGenerator>()?;
+
+    m.add_wrapped(wrap_pymodule!(query_parser_error))?;
+
+    Ok(())
+}
+
+/// Submodule containing all the possible errors that can be raised during
+/// query parsing.
+///
+/// Example:
+///     >>> import tantivy
+///     >>> from tantivy import query_parser_error
+///
+///     >>> builder = tantivy.SchemaBuilder()
+///
+///     >>> title = builder.add_text_field("title", stored=True)
+///     >>> body = builder.add_text_field("body")
+///     >>> id = builder.add_unsigned_field("id")
+///     >>> rating = builder.add_float_field("rating")
+///
+///     >>> schema = builder.build()
+///     >>> index = tantivy.Index(schema)
+///
+///     >>> query, errors = index.parse_query_lenient(
+///             "bod:'world' AND id:<3.5 AND rating:5.0"
+///         )
+///
+///     >>> assert len(errors) == 2
+///     >>> assert isinstance(errors[0], query_parser_error.FieldDoesNotExistError)
+///     >>> assert isinstance(errors[1], query_parser_error.ExpectedIntError)
+#[pymodule]
+fn query_parser_error(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_class::<parser_error::SyntaxError>()?;
+    m.add_class::<parser_error::UnsupportedQueryError>()?;
+    m.add_class::<parser_error::FieldDoesNotExistError>()?;
+    m.add_class::<parser_error::ExpectedIntError>()?;
+    m.add_class::<parser_error::ExpectedBase64Error>()?;
+    m.add_class::<parser_error::ExpectedFloatError>()?;
+    m.add_class::<parser_error::ExpectedBoolError>()?;
+    m.add_class::<parser_error::AllButQueryForbiddenError>()?;
+    m.add_class::<parser_error::NoDefaultFieldDeclaredError>()?;
+    m.add_class::<parser_error::FieldNotIndexedError>()?;
+    m.add_class::<parser_error::FieldDoesNotHavePositionsIndexedError>()?;
+    m.add_class::<parser_error::PhrasePrefixRequiresAtLeastTwoTermsError>()?;
+    m.add_class::<parser_error::UnknownTokenizerError>()?;
+    m.add_class::<parser_error::RangeMustNotHavePhraseError>()?;
+    m.add_class::<parser_error::DateFormatError>()?;
+    m.add_class::<parser_error::FacetFormatError>()?;
+    m.add_class::<parser_error::IpFormatError>()?;
+
     Ok(())
 }
 
@@ -92,7 +145,7 @@ pub(crate) fn get_field(
     schema: &tv::schema::Schema,
     field_name: &str,
 ) -> PyResult<tv::schema::Field> {
-    let field = schema.get_field(field_name).ok_or_else(|| {
+    let field = schema.get_field(field_name).map_err(|_err| {
         exceptions::PyValueError::new_err(format!(
             "Field `{field_name}` is not defined in the schema."
         ))
