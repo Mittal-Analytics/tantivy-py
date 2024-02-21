@@ -18,7 +18,7 @@ use index::Index;
 use query::Query;
 use schema::Schema;
 use schemabuilder::SchemaBuilder;
-use searcher::{DocAddress, Order, SearchResult, Searcher};
+use searcher::{DocAddress, Order, OrderByType, SearchResult, Searcher};
 use snippet::{Snippet, SnippetGenerator};
 
 use crate::document::extract_value;
@@ -87,6 +87,7 @@ fn tantivy(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Query>()?;
     m.add_class::<Snippet>()?;
     m.add_class::<SnippetGenerator>()?;
+    m.add_class::<OrderByType>()?;
 
     m.add_wrapped(wrap_pymodule!(query_parser_error))?;
 

@@ -1,10 +1,13 @@
 #![allow(clippy::new_ret_no_self)]
 
+use std::u64;
+
 use crate::{document::Document, query::Query, to_pyerr};
 use pyo3::{basic::CompareOp, exceptions::PyValueError, prelude::*};
 use serde::{Deserialize, Serialize};
 use tantivy as tv;
 use tantivy::collector::{Count, MultiCollector, TopDocs};
+use tv::DateTime;
 
 /// Tantivy's Searcher class
 ///
@@ -130,6 +133,13 @@ impl SearchResult {
     }
 }
 
+#[pyclass]
+#[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
+pub enum OrderByType {
+    U64,
+    DateTime,
+}
+
 #[pymethods]
 impl Searcher {
     /// Search the index with the given query and collect results.
@@ -152,7 +162,7 @@ impl Searcher {
     /// Returns `SearchResult` object.
     ///
     /// Raises a ValueError if there was an error with the search.
-    #[pyo3(signature = (query, limit = 10, count = true, order_by_field = None, offset = 0, order = Order::Desc))]
+    #[pyo3(signature = (query, limit = 10, count = true, order_by_field = None, offset = 0, order = Order::Desc, order_by_type = OrderByType::U64))]
     fn search(
         &self,
         py: Python,
@@ -162,6 +172,7 @@ impl Searcher {
         order_by_field: Option<&str>,
         offset: usize,
         order: Order,
+        order_by_type: OrderByType,
     ) -> PyResult<SearchResult> {
         py.allow_threads(move || {
             let mut multicollector = MultiCollector::new();
@@ -172,52 +183,73 @@ impl Searcher {
                 None
             };
 
-            let (mut multifruit, hits) = {
-                if let Some(order_by) = order_by_field {
-                    let collector = TopDocs::with_limit(limit)
-                        .and_offset(offset)
-                        .order_by_u64_field(order_by, order.into());
-                    let top_docs_handle =
-                        multicollector.add_collector(collector);
-                    let ret = self.inner.search(query.get(), &multicollector);
-
-                    match ret {
-                        Ok(mut r) => {
-                            let top_docs = top_docs_handle.extract(&mut r);
-                            let result: Vec<(Fruit, DocAddress)> = top_docs
-                                .iter()
-                                .map(|(f, d)| {
-                                    (Fruit::Order(*f), DocAddress::from(d))
-                                })
-                                .collect();
-                            (r, result)
-                        }
-                        Err(e) => {
-                            return Err(PyValueError::new_err(e.to_string()))
-                        }
+            let (mut multifruit, hits) = if let Some(order_by) = order_by_field
+            {
+                match order_by_type {
+                    OrderByType::U64 => {
+                        let collector = TopDocs::with_limit(limit)
+                            .and_offset(offset)
+                            .order_by_fast_field::<u64>(order_by, order.into());
+                        let top_docs_handle =
+                            multicollector.add_collector(collector);
+                        let mut r = self
+                            .inner
+                            .search(query.get(), &multicollector)
+                            .map_err(to_pyerr)?;
+                        let top_docs = top_docs_handle.extract(&mut r);
+                        let result: Vec<(Fruit, DocAddress)> = top_docs
+                            .iter()
+                            .map(|(f, d)| {
+                                (Fruit::Order(*f), DocAddress::from(d))
+                            })
+                            .collect();
+                        (r, result)
                     }
-                } else {
-                    let collector =
-                        TopDocs::with_limit(limit).and_offset(offset);
-                    let top_docs_handle =
-                        multicollector.add_collector(collector);
-                    let ret = self.inner.search(query.get(), &multicollector);
-
-                    match ret {
-                        Ok(mut r) => {
-                            let top_docs = top_docs_handle.extract(&mut r);
-                            let result: Vec<(Fruit, DocAddress)> = top_docs
-                                .iter()
-                                .map(|(f, d)| {
-                                    (Fruit::Score(*f), DocAddress::from(d))
-                                })
-                                .collect();
-                            (r, result)
-                        }
-                        Err(e) => {
-                            return Err(PyValueError::new_err(e.to_string()))
-                        }
+                    OrderByType::DateTime => {
+                        let collector = TopDocs::with_limit(limit)
+                            .and_offset(offset)
+                            .order_by_fast_field::<DateTime>(
+                                order_by,
+                                order.into(),
+                            );
+                        let top_docs_handle =
+                            multicollector.add_collector(collector);
+                        let mut r = self
+                            .inner
+                            .search(query.get(), &multicollector)
+                            .map_err(to_pyerr)?;
+                        let top_docs = top_docs_handle.extract(&mut r);
+                        let result: Vec<(Fruit, DocAddress)> = top_docs
+                            .iter()
+                            .map(|(f, d)| {
+                                (
+                                    Fruit::Order(
+                                        f.into_timestamp_millis() as u64
+                                    ),
+                                    DocAddress::from(d),
+                                )
+                            })
+                            .collect();
+                        (r, result)
                     }
+                }
+            } else {
+                let collector = TopDocs::with_limit(limit).and_offset(offset);
+                let top_docs_handle = multicollector.add_collector(collector);
+                let ret = self.inner.search(query.get(), &multicollector);
+
+                match ret {
+                    Ok(mut r) => {
+                        let top_docs = top_docs_handle.extract(&mut r);
+                        let result: Vec<(Fruit, DocAddress)> = top_docs
+                            .iter()
+                            .map(|(f, d)| {
+                                (Fruit::Score(*f), DocAddress::from(d))
+                            })
+                            .collect();
+                        (r, result)
+                    }
+                    Err(e) => return Err(PyValueError::new_err(e.to_string())),
                 }
             };
 

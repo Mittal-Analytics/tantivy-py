@@ -6,6 +6,10 @@ from typing import Any, Optional
 class Schema:
     pass
 
+class OrderByType(Enum):
+    U64 = 1
+    DateTime = 2
+
 class SchemaBuilder:
 
     @staticmethod
@@ -229,6 +233,7 @@ class Searcher:
             order_by_field: Optional[str] = None,
             offset: int = 0,
             order: Order = Order.Desc,
+            order_by_type: OrderByType = OrderByType.U64,
     ) -> SearchResult:
         pass
 

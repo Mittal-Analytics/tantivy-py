@@ -253,7 +253,7 @@ class TestClass(object):
 
         searcher = index.searcher()
 
-        result = searcher.search(query, 10, order_by_field="order")
+        result = searcher.search(query, 10, order_by_field="order", order_by_type=tantivy.OrderByType.DateTime)
 
         assert len(result.hits) == 3
 
